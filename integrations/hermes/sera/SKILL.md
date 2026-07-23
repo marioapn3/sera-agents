@@ -2,7 +2,7 @@
 name: sera
 description: Multi-currency settlement skill — quote, swap, and settle across 40+ stablecoins via Sera Protocol.
 version: 0.4.0
-author: Josh-sera
+author: Sera Protocol
 mcp_server:
   command: node
   args: ["~/Desktop/sera-mcp/dist/index.js"]
