@@ -64,8 +64,8 @@ Required env (boot refuses if any is missing):
 export X402_MODE=live
 export X402_NETWORK=base-sepolia                # start on testnet
 export X402_FACILITATOR_URL=https://api.cdp.coinbase.com/platform/v2/x402
-export X402_CDP_API_KEY_ID=organizations/.../apiKeys/... # CDP API Key Identifier
-export X402_CDP_API_KEY_SECRET="-----BEGIN EC PRIVATE KEY-----\n...\n-----END EC PRIVATE KEY-----" # CDP EC private key (PEM format)
+export X402_CDP_API_KEY_ID=...                  # CDP API Key Identifier
+export X402_CDP_API_KEY_SECRET=...              # CDP EC private key in PEM format (to sign ES256 JWTs)
 export X402_VAULT_ADDRESS=0xYourVault            # where USDC lands
 export X402_CONFIRMATION_DEPTH=3                 # ≥3 per arXiv:2605.11781 (mitigates revert-grant)
 export X402_LIVE_ACK=true                        # operator acknowledges live wiring not yet
