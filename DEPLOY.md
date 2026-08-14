@@ -11,6 +11,12 @@ internet ─► Caddy (80/443, TLS) ─┬─► static     (nginx, landing page
 
 `docker-compose.yml` and `agents-gateway/deploy/Caddyfile` are the source of truth.
 
+## Deployment scope
+
+`agents.sera.cx` publishes the static site and keyless MCP gateway only. The Compose file has no `x402-service`, and Caddy has no `/x402/*` route; consequently, this host does **not** provide a managed x402 API.
+
+Run the Path D demo locally at `localhost:8402`, or deploy `x402-service/` to infrastructure you operate. Public x402 operations — including deployment topology, Vault and facilitator secrets, payment monitoring, refunds, and production smoke tests — are outside this guide. Live operation also requires the Base Sepolia E2E and explicit operator acknowledgement described in [`x402-service/README.md`](x402-service/README.md) and [`SECURITY-MODEL.md`](SECURITY-MODEL.md).
+
 ---
 
 ## Prerequisites on the VM
@@ -93,7 +99,7 @@ All env vars are read from `.env` next to `docker-compose.yml`. None are require
 | Var | Default | Notes |
 |---|---|---|
 | `SERA_NETWORK` | `mainnet` | `mainnet` or `sepolia` |
-| `SERA_API_KEY` | _(unset)_ | Optional. Set to opt in to Sera's account-level quota; without it the four public tools work keyless. |
+| `SERA_API_KEY` | _(unset)_ | Optional. Set to opt in to Sera's account-level quota; without it all 17 keyless tools work. |
 | `SERA_API_SECRET` | _(unset)_ | Paired with `SERA_API_KEY` |
 | `GATEWAY_IMAGE_TAG` | `latest` | Pin to a specific image tag for reproducible rollouts (e.g. `sha-7848d1e…`) |
 
@@ -119,6 +125,8 @@ curl -fsS 'https://agents.sera.cx/rates?pairs=USDC/EURC' | head
 # Static landing page still served
 curl -fsS https://agents.sera.cx/ | head -5
 ```
+
+`/x402/swap` is intentionally not a smoke test: it is not served by `agents.sera.cx`.
 
 If any of those fail, see Troubleshooting below.
 

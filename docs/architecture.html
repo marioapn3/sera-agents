@@ -129,7 +129,7 @@
                   │                           │
        ┌──────────▼──────────┐    ┌───────────▼──────────┐
        │  sera-mcp           │    │  x402-service         │
-       │  52 tools, stdio    │    │  Express, /x402/swap  │
+       │  55 tools, stdio    │    │  Express, /x402/swap  │
        │  JSON-RPC.          │    │  402 → pay → 200      │
        │  Policy + caps +    │    │  Wraps sera-mcp.      │
        │  signer + dry-run.  │    │                       │
@@ -161,18 +161,18 @@
       <p>The canonical interface to Sera Protocol state. Token registry, market catalog, FX rates, quote generation, execute. Every higher layer routes through this.</p>
 
       <h3>3. <code>sera-mcp</code> (the MCP)</h3>
-      <p>52 tools exposed over the Model Context Protocol — stdio JSON-RPC. Wraps the REST API with policy gates, daily volume caps, dry-run kill switch, EIP-712 quote→sign→execute flow, server-derived USD notional, uuid-route_params binding. Self-contained: no SDK, no signer, no key handling.</p>
-      <p><strong>Why an MCP?</strong> Because every modern agent host (Claude, Cursor, ChatGPT, OpenClaw, Hermes, NanoClaw) speaks MCP natively. Three lines of config and your agent has 32 FX tools.</p>
+      <p>55 tools exposed over the Model Context Protocol — stdio JSON-RPC. Wraps the REST API with policy gates, daily volume caps, dry-run kill switch, EIP-712 quote→sign→execute flow, server-derived USD notional, uuid-route_params binding. Self-contained: no SDK, no signer, no key handling.</p>
+      <p><strong>Why an MCP?</strong> Because every modern agent host (Claude, Cursor, ChatGPT, OpenClaw, Hermes, NanoClaw) speaks MCP natively. Three lines of config and your agent has 55 FX tools.</p>
 
       <h3>4. <code>x402-service</code> (HTTP wrapper)</h3>
-      <p>A thin Express server that wraps <code>sera-mcp</code> behind the <code>x402</code> payment protocol. The calling agent pays USDC over plain HTTP, the service performs the FX swap on Sera, the recipient gets the target currency. No MCP host required, no SDK to import.</p>
+      <p>A thin Express server that you run locally or deploy yourself, wrapping <code>sera-mcp</code> behind the <code>x402</code> payment protocol. The calling agent pays USDC over plain HTTP, the service performs the FX swap on Sera, and the recipient gets the target currency. No MCP host or SDK is required, but <code>agents.sera.cx</code> does not host this service.</p>
 
       <h3>5. Templates &amp; bundled agent</h3>
       <p>Pre-wired starter projects (terminal chat, web chat, webhook responder) and a complete bundled <em>Sera Agent</em> — useful when you want one-command-to-run rather than configure-from-scratch.</p>
 
       <h2 class="gradient-text">Two execution paths</h2>
 
-      <p>Every interaction with Sera goes through one of two paths, depending on whether the caller speaks MCP or HTTP:</p>
+      <p>Use the MCP path directly, or self-host the HTTP path when the caller speaks x402:</p>
 
       <h3>Path 1 — MCP (the default)</h3>
       <ul>
@@ -183,9 +183,9 @@
         <li>On-chain settlement; agent polls <code>sera.settlement_status</code> for confirmation.</li>
       </ul>
 
-      <h3>Path 2 — x402 (skip MCP)</h3>
+      <h3>Path 2 — self-hosted x402</h3>
       <ul>
-        <li>Caller hits <code>POST /x402/swap</code> on the x402-service.</li>
+        <li>You run <code>x402-service</code> locally or deploy it; the caller hits <code>POST /x402/swap</code> on your service.</li>
         <li>Server returns <code>402 Payment Required</code> + a payment_id.</li>
         <li>Caller pays USDC (EIP-3009 transferWithAuthorization) and retries with <code>X-PAYMENT</code> header.</li>
         <li>Server verifies the payment, then performs the FX swap on Sera using a vault wallet, then transfers the target currency to the recipient.</li>
@@ -210,13 +210,13 @@
       </ul>
 
       <h3>x402 trust model</h3>
-      <p>The x402-service runs a vault wallet that holds USDC inflows and executes the FX swap. That's a centralized custodian for the duration of the swap. Use the MCP path if you want the user's own wallet to sign every leg.</p>
+      <p>Your x402-service deployment runs a vault wallet that holds USDC inflows and executes the FX swap. That's a centralized custodian for the duration of the swap. Use the MCP path if you want the user's own wallet to sign every leg.</p>
 
       <h2 class="gradient-text">Where to put your code</h2>
 
       <ul>
         <li><strong>An MCP plugin / agent skill</strong> — call <code>sera.*</code> tools, no extra infra needed. Cheapest, most flexible. See <a href="tutorials/ai-agent.html">AI agent tutorial</a>.</li>
-        <li><strong>A web app</strong> — call sera-mcp from your backend (spawn it as a subprocess, talk JSON-RPC over stdio) OR call <code>sera-agents/x402-service</code> over plain HTTP. See <a href="tutorials/cross-border-payment-widget.html">payment widget</a> + <a href="tutorials/fx-trading-dashboard.html">trading dashboard</a> tutorials.</li>
+        <li><strong>A web app</strong> — call sera-mcp from your backend (spawn it as a subprocess, talk JSON-RPC over stdio) OR self-host <code>sera-agents/x402-service</code> and call your deployment over plain HTTP. See <a href="tutorials/cross-border-payment-widget.html">payment widget</a> + <a href="tutorials/fx-trading-dashboard.html">trading dashboard</a> tutorials.</li>
         <li><strong>A smart contract</strong> — read Sera's reference rate from your contract via an oracle wrapper or call <code>get_fx_rate</code> off-chain and post it on-chain. See <a href="tutorials/prediction-market.html">prediction market tutorial</a>.</li>
         <li><strong>A cron job</strong> — call the bundled <code>sera</code> CLI from your scheduler. See <a href="tutorials/treasury-rebalancer.html">treasury rebalancer tutorial</a>.</li>
         <li><strong>An x402-paid API</strong> — wrap your own service in the same x402 pattern we use. See <a href="tutorials/x402-paid-api.html">x402-paid API tutorial</a>.</li>
@@ -225,7 +225,7 @@
       <h2 class="gradient-text">Repository layout</h2>
 
       <div class="codeblock my-6">
-<pre><code><span style="color:#7DF9C2">sera-mcp/</span>            <span style="color:#6B7180">— the MCP server itself (52 tools, CLI)</span>
+<pre><code><span style="color:#7DF9C2">sera-mcp/</span>            <span style="color:#6B7180">— the MCP server itself (55 tools, CLI)</span>
 <span style="color:#7DF9C2">sera-agents/</span>
 ├── <span style="color:#A4A89C">integrations/</span>     <span style="color:#6B7180">— per-host install snippets (11 hosts)</span>
 ├── <span style="color:#A4A89C">templates/</span>        <span style="color:#6B7180">— chat-cli · web-chat · webhook starters</span>
@@ -237,14 +237,14 @@
 </code></pre>
       </div>
 
-      <p class="mt-12">Next up: <a href="concepts.html">Concepts (CLOB, MCP, x402, EIP-712)</a> · <a href="tutorials/">Pick a tutorial</a> · <a href="api/">Full API reference</a>.</p>
+      <p class="mt-12">For local demo and live-readiness requirements, see <a href="https://github.com/sera-cx/sera-agents/blob/main/x402-service/README.md">x402-service/README.md</a> and <a href="https://github.com/sera-cx/sera-agents/blob/main/SECURITY-MODEL.md">SECURITY-MODEL.md</a>. Next up: <a href="concepts.html">Concepts (CLOB, MCP, x402, EIP-712)</a> · <a href="tutorials/">Pick a tutorial</a> · <a href="api/">Full API reference</a>.</p>
 
     </main>
   </div>
 
   <footer class="border-t border-white/5 py-10">
     <div class="max-w-7xl mx-auto px-5 lg:px-6 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-chalk-500">
-      <div class="font-mono">v0.8.3 · MIT · 52 tools live</div>
+      <div class="font-mono">v0.8.3 · MIT · 55 tools live</div>
       <div>Built on <a href="https://docs.sera.cx" target="_blank" class="hover:text-chalk-300">Sera Protocol</a>.</div>
     </div>
   </footer>
