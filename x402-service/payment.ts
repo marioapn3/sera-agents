@@ -26,6 +26,7 @@ import {
 } from "./facilitator.js";
 import { checkOnce } from "./payment-confirm.js";
 import { parsePaymentAuthorization } from "./payment-binding.js";
+import { verifyTransferAuthorization } from "./eip3009.js";
 import type { SeraMcpClient } from "./sera-client.js";
 
 export interface VerifyOutcome {
@@ -156,6 +157,8 @@ export async function confirmPayment(
   // proof we cannot bind.
   const auth = parsePaymentAuthorization(paymentAuthorizationHeader);
   if (!auth) return { ok: false, reason: "payment authorization unparseable — cannot bind confirmation" };
+
+  const asset = cfg.cdpUsdcAddress ?? "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
   const required = BigInt(String(Math.ceil(pending.amount_usdc * 1e6)));
   if (auth.to !== cfg.vaultAddress!.toLowerCase()) {
     return { ok: false, reason: "authorization recipient is not the vault" };
@@ -164,12 +167,27 @@ export async function confirmPayment(
     return { ok: false, reason: "authorized value below required amount" };
   }
 
+  // CRYPTOGRAPHIC BINDING — the load-bearing anti-forgery check. Recover the
+  // EIP-3009 signer and require it to equal `from`, so a malicious facilitator
+  // cannot claim someone else's `from`/tx. Without a chainId we cannot verify
+  // and therefore refuse (fail-closed).
+  if (cfg.chainId === undefined) {
+    return { ok: false, reason: "no chainId configured for signature verification" };
+  }
+  const sig = await verifyTransferAuthorization(
+    auth,
+    auth.signature,
+    { name: cfg.usdcName, version: cfg.usdcVersion, chainId: cfg.chainId, verifyingContract: asset },
+    Date.now() / 1000,
+  );
+  if (!sig.ok) return { ok: false, reason: `payment signature invalid: ${sig.reason}` };
+
   // Single shot per request — the client drives retry cadence via 202s; no
   // long in-handler poll to park connections on.
   const result = await checkOnce(
     {
       rpcUrl: cfg.rpcUrl,
-      asset: cfg.cdpUsdcAddress ?? "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      asset,
       vault: cfg.vaultAddress!,
       minAmountBaseUnits: required.toString(),
       confirmationDepth: cfg.confirmationDepth,

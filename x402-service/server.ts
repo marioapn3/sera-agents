@@ -338,6 +338,11 @@ app.post("/x402/swap", async (c) => {
   if (pending.status === "executing") {
     return c.json({ error: "still_executing", retry_after_seconds: 5 }, 202);
   }
+  if (pending.status === "settle_failed") {
+    // Terminal: facilitator /settle failed, no USDC was charged. Idempotent
+    // clean response on retry (not a 500, not a refund case).
+    return c.json({ error: "settle_failed", payment_id: pending.payment_id, charged: false }, 409);
+  }
   if (pending.status === "failed_refundable") {
     // Failure is terminal at the HTTP layer. Operators see these via
     // /admin/refundables. We do NOT auto-revert to executing — the swap

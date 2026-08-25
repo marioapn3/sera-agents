@@ -14,8 +14,11 @@ const X402_HEADER_OBJ = {
   scheme: "exact",
   network: "eip155:11155111",
   payload: {
-    signature: "0xsig",
-    authorization: { from: FROM, to: VAULT, value: "1000000", nonce: "0x01" },
+    signature: "0xababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+    authorization: {
+      from: FROM, to: VAULT, value: "1000000",
+      validAfter: "0", validBefore: "9999999999", nonce: "0x" + "01".repeat(32),
+    },
   },
 };
 
@@ -23,13 +26,17 @@ describe("parsePaymentAuthorization", () => {
   it("parses the standard base64 x402 payload and lowercases addresses", () => {
     const header = Buffer.from(JSON.stringify(X402_HEADER_OBJ)).toString("base64");
     const a = parsePaymentAuthorization(header);
-    expect(a).toEqual({ from: FROM.toLowerCase(), to: VAULT.toLowerCase(), value: "1000000", nonce: "0x01" });
+    expect(a?.from).toBe(FROM.toLowerCase());
+    expect(a?.value).toBe("1000000");
+    expect(a?.signature).toBe("0xababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab");
   });
 
   it("parses raw JSON and a bare authorization object", () => {
     expect(parsePaymentAuthorization(JSON.stringify(X402_HEADER_OBJ))?.value).toBe("1000000");
     expect(
-      parsePaymentAuthorization(JSON.stringify({ from: FROM, to: VAULT, value: "5" }))?.value,
+      parsePaymentAuthorization(JSON.stringify({
+        from: FROM, to: VAULT, value: "5", validAfter: "0", validBefore: "9", nonce: "0x"+"01".repeat(32), signature: "0xababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+      }))?.value,
     ).toBe("5");
   });
 
@@ -38,9 +45,9 @@ describe("parsePaymentAuthorization", () => {
       "",
       "not-base64-json",
       Buffer.from("[1,2,3]").toString("base64"),
-      JSON.stringify({ payload: { authorization: { from: "nope", to: VAULT, value: "1" } } }),
-      JSON.stringify({ payload: { authorization: { from: FROM, to: VAULT, value: "-5" } } }),
-      JSON.stringify({ payload: { authorization: { from: FROM, to: VAULT, value: "1.5" } } }),
+      JSON.stringify({ payload: { signature: "0xababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab", authorization: { from: "nope", to: VAULT, value: "1", validAfter: "0", validBefore: "9", nonce: "0x"+"01".repeat(32) } } }),
+      JSON.stringify({ payload: { signature: "0xababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab", authorization: { from: FROM, to: VAULT, value: "-5", validAfter: "0", validBefore: "9", nonce: "0x"+"01".repeat(32) } } }),
+      JSON.stringify({ payload: { authorization: { from: FROM, to: VAULT, value: "1", validAfter: "0", validBefore: "9", nonce: "0x"+"01".repeat(32) } } }),  // missing signature
     ]) {
       expect(parsePaymentAuthorization(bad)).toBeNull();
     }

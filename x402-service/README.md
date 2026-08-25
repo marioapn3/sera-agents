@@ -126,12 +126,15 @@ A facilitator (CDP or your own) only *reports* verify/settle results. A
 compromised facilitator could report success for a payment that never
 happened — so this service **independently confirms the payment on-chain**
 before executing any swap, and **binds that confirmation to the specific
-payment**: via `X402_RPC_URL` it checks the settle transaction succeeded and
-emitted a USDC `Transfer` **from the payer named in this payment's signed
-EIP-3009 authorization**, of **exactly the authorized value**, **to the vault
-address**, buried under ≥ `X402_CONFIRMATION_DEPTH` blocks. Each settle tx
-hash is then **consumed single-use** (persisted), so one on-chain payment can
-authorize at most one delivery — a facilitator pointing at someone else's
+payment**: it first **verifies the payer's EIP-3009 signature** — recovering the signer of
+the `transferWithAuthorization` typed data and requiring it to equal `from`, so
+a malicious facilitator cannot name a payer (or a victim) it doesn't hold the
+key for. Then via `X402_RPC_URL` it checks the settle transaction succeeded and
+emitted a USDC `Transfer` **from that verified payer**, of **exactly the
+authorized value**, **to the vault address**, buried under ≥
+`X402_CONFIRMATION_DEPTH` blocks. Each settle tx hash is then **consumed
+single-use** (persisted to `X402_STATE_DB`, required in live mode), so one
+on-chain payment can authorize at most one delivery — a facilitator pointing at someone else's
 legitimate transfer, or replaying one deposit across many payment_ids, is
 refused. Until the bound check passes the payment stays un-executed and
 clients get `202 payment_not_confirmed_onchain`.

@@ -36,6 +36,11 @@ export interface X402Config {
   // the OPERATOR controls on the payment chain.
   rpcUrl?: string;
   skipOnchainConfirm: boolean; // explicit opt-out — trusts the facilitator alone (NOT recommended)
+  // EIP-712 domain for verifying the payer's EIP-3009 signature (makes `from`
+  // un-forgeable). chainId is derived from network / X402_CHAIN_ID.
+  chainId?: number;
+  usdcName: string;    // EIP-712 domain name of the payment token (USDC default)
+  usdcVersion: string; // EIP-712 domain version
   // Operator gates
   liveAck: boolean;          // set true to acknowledge wired-but-not-production-tested live mode
 }
@@ -88,6 +93,9 @@ export function loadConfig(): X402Config {
     confirmationDepth: Number(process.env.X402_CONFIRMATION_DEPTH ?? 3),
     rpcUrl: process.env.X402_RPC_URL,
     skipOnchainConfirm: bool("X402_SKIP_ONCHAIN_CONFIRM", false),
+    chainId: deriveChainId(process.env.X402_CHAIN_ID, process.env.X402_NETWORK ?? "base"),
+    usdcName: process.env.X402_USDC_NAME ?? "USD Coin",
+    usdcVersion: process.env.X402_USDC_VERSION ?? "2",
     liveAck: bool("X402_LIVE_ACK", false),
   };
 
@@ -167,6 +175,25 @@ function enforceSafetyGates(cfg: X402Config): void {
           `Base mainnet USDC and is only valid for X402_NETWORK=base.\n\n`,
       );
     }
+    // Anti-replay ledger must be durable in live mode — a memory-only ledger is
+    // wiped on restart, letting a consumed settle tx be replayed.
+    if (!cfg.stateDb) {
+      fail(
+        `\nrefusing to start: X402_MODE=live requires X402_STATE_DB (a SQLite path) so\n` +
+          `the single-use payment ledger survives restarts. Without it, a consumed\n` +
+          `settle tx could be replayed after a crash/redeploy.\n\n` +
+          `Set X402_STATE_DB=/var/lib/x402/state.db\n\n`,
+      );
+    }
+    // Signature verification needs the token's EIP-712 chainId. Only required
+    // when the on-chain confirm actually runs (i.e. an RPC is configured).
+    if (cfg.rpcUrl && cfg.chainId === undefined) {
+      fail(
+        `\nrefusing to start: cannot derive an EVM chainId for X402_NETWORK=${cfg.cdpNetwork}.\n` +
+          `The chainId is needed to verify the payer's EIP-3009 signature. Set\n` +
+          `X402_CHAIN_ID=<id> (e.g. 11155111 for Ethereum Sepolia, 8453 for Base).\n\n`,
+      );
+    }
     if (!cfg.liveAck) {
       fail(
         `\nrefusing to start: live mode wiring is in place but NOT YET\n` +
@@ -184,6 +211,23 @@ function enforceSafetyGates(cfg: X402Config): void {
       );
     }
   }
+}
+
+// Map the network string (or explicit X402_CHAIN_ID) to an EVM chainId for the
+// EIP-712 signing domain. Known Coinbase-facilitator networks are named; any
+// eip155:<id> is parsed; otherwise undefined (gated in live mode below).
+const KNOWN_CHAIN_IDS: Record<string, number> = {
+  base: 8453,
+  "base-sepolia": 84532,
+  polygon: 137,
+  arbitrum: 42161,
+};
+function deriveChainId(explicit: string | undefined, network: string): number | undefined {
+  if (explicit && /^\d+$/.test(explicit)) return Number(explicit);
+  if (KNOWN_CHAIN_IDS[network] !== undefined) return KNOWN_CHAIN_IDS[network];
+  const m = /^eip155:(\d+)$/.exec(network);
+  if (m) return Number(m[1]);
+  return undefined;
 }
 
 function bool(envName: string, defaultValue: boolean): boolean {
