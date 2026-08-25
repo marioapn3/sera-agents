@@ -24,6 +24,7 @@ import {
   type FacilitatorConfig,
   type PaymentRequirements,
 } from "./facilitator.js";
+import { confirmPaymentOnChain } from "./payment-confirm.js";
 import type { SeraMcpClient } from "./sera-client.js";
 
 export interface VerifyOutcome {
@@ -48,11 +49,14 @@ export interface ExecuteOutcome {
 }
 
 function makeFacilitatorConfig(cfg: X402Config): FacilitatorConfig {
-  // Caller has already passed env safety gates — non-null assertions are safe.
+  // Caller has already passed env safety gates — non-null assertions are safe
+  // for the fields the gates require for the configured kind.
   return {
+    kind: cfg.facilitatorKind,
     url: cfg.facilitatorUrl!,
-    apiKeyId: cfg.cdpApiKeyId!,
-    apiKeySecret: cfg.cdpApiKeySecret!,
+    apiKeyId: cfg.cdpApiKeyId,
+    apiKeySecret: cfg.cdpApiKeySecret,
+    bearerToken: cfg.facilitatorToken,
     network: cfg.cdpNetwork,
     confirmationDepth: cfg.confirmationDepth,
   };
@@ -118,6 +122,42 @@ export async function settlePayment(
     return { ok: false, reason: result.error ?? "settle failed" };
   }
   return { ok: true, txHash: result.txHash, networkId: result.networkId };
+}
+
+// ── On-chain confirmation gate ───────────────────────────────────────────
+// Independently verifies the settle tx actually moved >= the required USDC
+// into the vault, at >= confirmationDepth. This is the control that makes a
+// lying/compromised facilitator unable to trigger free delivery. Demo mode
+// and the explicit X402_SKIP_ONCHAIN_CONFIRM opt-out skip it.
+export interface ConfirmOutcome {
+  ok: boolean;
+  reason?: string;
+  skipped?: boolean;
+}
+
+export async function confirmPayment(
+  cfg: X402Config,
+  pending: PendingPayment,
+  settleTxHash: string | undefined,
+): Promise<ConfirmOutcome> {
+  if (cfg.mode === "demo") return { ok: true, skipped: true };
+  if (cfg.skipOnchainConfirm && !cfg.rpcUrl) return { ok: true, skipped: true };
+  if (!cfg.rpcUrl) return { ok: false, reason: "no X402_RPC_URL configured" };
+  if (!settleTxHash) {
+    // Facilitator claimed success but produced no tx hash — nothing to verify.
+    return { ok: false, reason: "settle returned no txHash to confirm on-chain" };
+  }
+  const result = await confirmPaymentOnChain(
+    {
+      rpcUrl: cfg.rpcUrl,
+      asset: cfg.cdpUsdcAddress ?? "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      vault: cfg.vaultAddress!,
+      minAmountBaseUnits: String(Math.ceil(pending.amount_usdc * 1e6)),
+      confirmationDepth: cfg.confirmationDepth,
+    },
+    settleTxHash,
+  );
+  return result.confirmed ? { ok: true } : { ok: false, reason: result.reason };
 }
 
 // ── Execute Sera swap ────────────────────────────────────────────────────

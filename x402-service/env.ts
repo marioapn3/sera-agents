@@ -22,13 +22,20 @@ export interface X402Config {
   stateDb?: string;
   seraMcpPath: string;
   vaultAddress?: string;
-  // Live-mode facilitator config (CDP)
+  // Live-mode facilitator config
+  facilitatorKind: "cdp" | "selfhosted"; // cdp (Coinbase-hosted) | selfhosted (your own x402 facilitator)
   facilitatorUrl?: string;
+  facilitatorToken?: string; // selfhosted only: optional static bearer for your facilitator
   cdpApiKeyId?: string;
   cdpApiKeySecret?: string;
-  cdpNetwork: string;        // base | base-sepolia | polygon | arbitrum | solana
+  cdpNetwork: string;        // cdp: base | base-sepolia | ... | selfhosted: any (e.g. eip155:11155111)
   cdpUsdcAddress?: string;
   confirmationDepth: number; // k≥3 on Base mainnet (per arXiv:2605.11781)
+  // On-chain confirmation gate (live mode): independently verify the payment
+  // landed in the vault before executing the swap. rpcUrl is an RPC endpoint
+  // the OPERATOR controls on the payment chain.
+  rpcUrl?: string;
+  skipOnchainConfirm: boolean; // explicit opt-out — trusts the facilitator alone (NOT recommended)
   // Operator gates
   liveAck: boolean;          // set true to acknowledge wired-but-not-production-tested live mode
 }
@@ -65,12 +72,22 @@ export function loadConfig(): X402Config {
       return p;
     })(),
     vaultAddress: process.env.X402_VAULT_ADDRESS,
+    facilitatorKind: (() => {
+      const k = (process.env.X402_FACILITATOR_KIND ?? "cdp").toLowerCase();
+      if (k !== "cdp" && k !== "selfhosted") {
+        fail(`\nX402_FACILITATOR_KIND must be 'cdp' or 'selfhosted' (got '${k}')\n\n`);
+      }
+      return k as "cdp" | "selfhosted";
+    })(),
     facilitatorUrl: process.env.X402_FACILITATOR_URL,
+    facilitatorToken: process.env.X402_FACILITATOR_TOKEN,
     cdpApiKeyId: process.env.X402_CDP_API_KEY_ID,
     cdpApiKeySecret: process.env.X402_CDP_API_KEY_SECRET,
     cdpNetwork: process.env.X402_NETWORK ?? "base",
     cdpUsdcAddress: process.env.X402_USDC_ADDRESS,
     confirmationDepth: Number(process.env.X402_CONFIRMATION_DEPTH ?? 3),
+    rpcUrl: process.env.X402_RPC_URL,
+    skipOnchainConfirm: bool("X402_SKIP_ONCHAIN_CONFIRM", false),
     liveAck: bool("X402_LIVE_ACK", false),
   };
 
@@ -97,19 +114,53 @@ function enforceSafetyGates(cfg: X402Config): void {
   if (cfg.mode === "live") {
     const missing: string[] = [];
     if (!cfg.facilitatorUrl) missing.push("X402_FACILITATOR_URL");
-    if (!cfg.cdpApiKeyId) missing.push("X402_CDP_API_KEY_ID");
-    if (!cfg.cdpApiKeySecret) missing.push("X402_CDP_API_KEY_SECRET");
+    if (cfg.facilitatorKind === "cdp") {
+      if (!cfg.cdpApiKeyId) missing.push("X402_CDP_API_KEY_ID");
+      if (!cfg.cdpApiKeySecret) missing.push("X402_CDP_API_KEY_SECRET");
+    }
     if (!cfg.vaultAddress) missing.push("X402_VAULT_ADDRESS");
     if (missing.length > 0) {
       fail(
-        `\nrefusing to start: X402_MODE=live requires CDP facilitator + vault config.\n` +
+        `\nrefusing to start: X402_MODE=live requires facilitator + vault config.\n` +
           `Missing: ${missing.join(", ")}\n\n` +
           `For local dev, use X402_MODE=demo with HOST=127.0.0.1.\n` +
-          `For live mainnet, set:\n` +
+          `For live with Coinbase CDP (default):\n` +
           `  X402_FACILITATOR_URL=https://api.cdp.coinbase.com/platform/v2/x402\n` +
           `  X402_CDP_API_KEY_ID=...\n` +
           `  X402_CDP_API_KEY_SECRET=...\n` +
-          `  X402_VAULT_ADDRESS=0x...  (where USDC payment lands)\n\n`,
+          `  X402_VAULT_ADDRESS=0x...  (where USDC payment lands)\n` +
+          `For live with your own facilitator (any EVM chain incl. Ethereum Sepolia):\n` +
+          `  X402_FACILITATOR_KIND=selfhosted\n` +
+          `  X402_FACILITATOR_URL=https://your-facilitator.example/x402\n` +
+          `  X402_VAULT_ADDRESS=0x...\n\n`,
+      );
+    }
+    // The on-chain confirmation gate is what makes a lying/compromised
+    // facilitator unable to trigger free delivery. Require an operator RPC
+    // unless explicitly (and loudly) opted out.
+    if (!cfg.rpcUrl && !cfg.skipOnchainConfirm) {
+      fail(
+        `\nrefusing to start: X402_MODE=live requires X402_RPC_URL (an RPC endpoint\n` +
+          `YOU control on the payment chain) so the service can independently confirm\n` +
+          `the USDC payment landed in the vault before executing the swap.\n` +
+          `Without it, delivery trusts the facilitator's word alone — a compromised\n` +
+          `facilitator could trigger free FX delivery from your vault.\n\n` +
+          `Set X402_RPC_URL=https://...  (recommended)\n` +
+          `or  X402_SKIP_ONCHAIN_CONFIRM=true to accept that risk explicitly.\n\n`,
+      );
+    }
+    if (!cfg.rpcUrl && cfg.skipOnchainConfirm) {
+      process.stderr.write(
+        `[x402] WARNING: X402_SKIP_ONCHAIN_CONFIRM=true — delivery will trust the\n` +
+          `[x402] facilitator response alone. A compromised facilitator can trigger\n` +
+          `[x402] free delivery from the vault. Not recommended for real funds.\n`,
+      );
+    }
+    if (cfg.facilitatorKind === "selfhosted" && !cfg.cdpUsdcAddress) {
+      fail(
+        `\nrefusing to start: X402_FACILITATOR_KIND=selfhosted requires X402_USDC_ADDRESS\n` +
+          `(the payment-asset ERC-20 contract on your chosen chain). There is no safe\n` +
+          `default off Base — e.g. Ethereum Sepolia USDC differs from Base USDC.\n\n`,
       );
     }
     if (!cfg.liveAck) {

@@ -94,6 +94,7 @@ describe("loadConfig — live-mode required envs", () => {
     process.env.X402_CDP_API_KEY_ID = "test-id";
     process.env.X402_CDP_API_KEY_SECRET = "test-secret";
     process.env.X402_VAULT_ADDRESS = "0x" + "a".repeat(40);
+    process.env.X402_RPC_URL = "https://rpc.test";
   }
 
   it("refuses live mode without X402_FACILITATOR_URL", () => {

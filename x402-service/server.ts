@@ -37,6 +37,7 @@ import { makeStore, type PendingPayment } from "./state.js";
 import { makeSeraMcpClient } from "./sera-client.js";
 import {
   verifyPayment,
+  confirmPayment,
   settlePayment,
   executeSwap,
   transitionToVerified,
@@ -393,6 +394,36 @@ app.post("/x402/swap", async (c) => {
   if (!current) return c.json({ error: "lost_state" }, 500);
 
   if (current.status === "verified") {
+    // ── On-chain confirmation gate (verified → executing edge) ─────────
+    // The facilitator said the payment settled; independently confirm the
+    // USDC actually landed in the vault before releasing any FX. Sits on
+    // this edge so a payment that hasn't confirmed yet stays `verified` and
+    // every client retry re-checks — a lying facilitator can never push a
+    // payment past this point. Pure read; safe to repeat.
+    let settleTxHash: string | undefined;
+    try {
+      settleTxHash = current.settlement_payload
+        ? (JSON.parse(current.settlement_payload) as { txHash?: string }).txHash
+        : undefined;
+    } catch {
+      settleTxHash = undefined;
+    }
+    const confirmResult = await confirmPayment(cfg, current, settleTxHash);
+    if (!confirmResult.ok) {
+      process.stderr.write(
+        `[confirm] ${current.payment_id}: not confirmed on-chain yet: ${confirmResult.reason}\n`,
+      );
+      return c.json(
+        {
+          error: "payment_not_confirmed_onchain",
+          payment_id: current.payment_id,
+          reason: confirmResult.reason,
+          retry_after_seconds: 10,
+        },
+        202,
+      );
+    }
+
     if (!transitionToExecuting(store, current)) {
       // Another concurrent request already moved it.
       const fresh = store.load(paymentId);

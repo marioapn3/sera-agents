@@ -94,6 +94,54 @@ npm start
 
 After verifying end-to-end on Base Sepolia, switch `X402_NETWORK=base` for mainnet. Don't switch any other knobs.
 
+## Run live (self-hosted facilitator — any EVM chain, incl. Ethereum Sepolia)
+
+The facilitator backend is pluggable. Instead of Coinbase CDP you can run your
+own x402 facilitator (e.g. the Apache-2.0 reference implementation from
+[coinbase/x402](https://github.com/coinbase/x402)) against any EVM RPC and
+point this service at it:
+
+```bash
+export X402_MODE=live
+export X402_FACILITATOR_KIND=selfhosted
+export X402_FACILITATOR_URL=https://your-facilitator.example/x402
+export X402_FACILITATOR_TOKEN=...        # optional static bearer for YOUR facilitator
+export X402_NETWORK=eip155:11155111      # e.g. Ethereum Sepolia
+export X402_USDC_ADDRESS=0x...           # payment asset on that chain (required)
+export X402_VAULT_ADDRESS=0x...
+export X402_RPC_URL=https://...          # RPC YOU control on the payment chain
+export X402_LIVE_ACK=true
+```
+
+This removes the Coinbase dependency entirely and lets the payment leg run on
+the same chain as Sera settlement (Ethereum), eliminating the cross-chain
+hand-off.
+
+### Trust model: the facilitator is NOT trusted with delivery
+
+**Self-host at your own risk — and read this before running live.** Whoever
+operates this service custodies the vault; Sera does not host it.
+
+A facilitator (CDP or your own) only *reports* verify/settle results. A
+compromised facilitator could report success for a payment that never
+happened — so this service **independently confirms the payment on-chain**
+before executing any swap: it checks via `X402_RPC_URL` that the settle
+transaction succeeded, transferred ≥ the required USDC **to the vault
+address**, and is buried under ≥ `X402_CONFIRMATION_DEPTH` blocks. Until that
+check passes the payment stays un-executed and clients get `202
+payment_not_confirmed_onchain`.
+
+Consequences of a hacked self-hosted facilitator are therefore bounded: it can
+censor/DoS payments and waste its own gas wallet, but it cannot trigger free
+FX delivery from the vault (blocked by the on-chain gate) and it cannot steal
+buyer funds (EIP-3009 signatures are scoped to exact amount/recipient). The
+key that CAN drain the vault is the swap signer (`SIGNER_PRIVATE_KEY`) — keep
+it off the facilitator host, ideally in a KMS/HSM, and fund the vault only to
+operating float.
+
+Opting out of the gate (`X402_SKIP_ONCHAIN_CONFIRM=true`) restores blind trust
+in the facilitator and is not recommended for real funds.
+
 ## Endpoints
 
 | Method | Path | Purpose |
