@@ -138,9 +138,13 @@ async function postJson<T>(
     });
     if (!res.ok) {
       const text = await res.text();
-      return onHttpError(res.status, text.slice(0, 200));
+      return onHttpError(res.status, text.replace(/[\r\n]+/g, " ").slice(0, 200));
     }
-    return { data: await res.json() };
+    const parsed = await res.json();
+    // A 2xx with a non-object body (null, array, string) is ambiguous —
+    // normalize to {} so the explicit ===true checks below fail closed
+    // instead of throwing.
+    return { data: parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {} };
   } catch (e: any) {
     return onUnreachable(e?.message ?? String(e));
   }

@@ -148,6 +148,24 @@ describe("loadConfig — live-mode required envs", () => {
     }
   });
 
+  it("refuses live mode on a non-base network without X402_USDC_ADDRESS", () => {
+    setLiveBase();
+    process.env.X402_NETWORK = "eip155:11155111";
+    delete process.env.X402_USDC_ADDRESS;
+    const spyExit = vi.spyOn(process, "exit").mockImplementation((() => {
+      throw new Error("exit");
+    }) as any);
+    const spyErr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(() => loadConfig()).toThrow();
+      const msg = spyErr.mock.calls.map((c) => String(c[0])).join("");
+      expect(msg).toMatch(/X402_USDC_ADDRESS/);
+    } finally {
+      spyExit.mockRestore();
+      spyErr.mockRestore();
+    }
+  });
+
   it("refuses live mode without X402_LIVE_ACK=true", () => {
     setLiveBase();
     delete process.env.X402_LIVE_ACK;

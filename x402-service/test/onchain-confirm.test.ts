@@ -26,6 +26,11 @@ function topicFor(addr: string): string {
   return "0x" + addr.toLowerCase().replace(/^0x/, "").padStart(64, "0");
 }
 
+/** Real receipts carry Transfer values as one full 32-byte word. */
+function word(n: number): string {
+  return "0x" + n.toString(16).padStart(64, "0");
+}
+
 /** Mock fetch answering eth_getTransactionReceipt / eth_blockNumber. */
 function mockRpc(receipt: unknown, headBlock = "0x64" /* 100 */) {
   vi.stubGlobal(
@@ -49,7 +54,7 @@ function goodReceipt(overrides: Record<string, unknown> = {}) {
       {
         address: USDC,
         topics: [TRANSFER_TOPIC, topicFor(OTHER), topicFor(VAULT)],
-        data: "0x" + (1_000_000).toString(16), // exactly the required amount
+        data: word(1_000_000), // exactly the required amount
       },
     ],
     ...overrides,
@@ -79,7 +84,7 @@ describe("checkOnce — confirms only a real, deep-enough vault payment", () => 
   it("REFUSES when the transfer went to a different recipient", async () => {
     mockRpc(
       goodReceipt({
-        logs: [{ address: USDC, topics: [TRANSFER_TOPIC, topicFor(VAULT), topicFor(OTHER)], data: "0xf4240" }],
+        logs: [{ address: USDC, topics: [TRANSFER_TOPIC, topicFor(VAULT), topicFor(OTHER)], data: word(1_000_000) }],
       }),
     );
     expect((await checkOnce(CFG, "0xabc")).confirmed).toBe(false);
@@ -88,7 +93,7 @@ describe("checkOnce — confirms only a real, deep-enough vault payment", () => 
   it("REFUSES when the transfer is on a different token contract", async () => {
     mockRpc(
       goodReceipt({
-        logs: [{ address: OTHER, topics: [TRANSFER_TOPIC, topicFor(OTHER), topicFor(VAULT)], data: "0xf4240" }],
+        logs: [{ address: OTHER, topics: [TRANSFER_TOPIC, topicFor(OTHER), topicFor(VAULT)], data: word(1_000_000) }],
       }),
     );
     expect((await checkOnce(CFG, "0xabc")).confirmed).toBe(false);
@@ -101,7 +106,7 @@ describe("checkOnce — confirms only a real, deep-enough vault payment", () => 
           {
             address: USDC,
             topics: [TRANSFER_TOPIC, topicFor(OTHER), topicFor(VAULT)],
-            data: "0x" + (999_999).toString(16),
+            data: word(999_999),
           },
         ],
       }),
@@ -124,5 +129,42 @@ describe("checkOnce — confirms only a real, deep-enough vault payment", () => 
   it("REFUSES (fail-closed) when fetch itself throws", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("network down"); }));
     expect((await checkOnce(CFG, "0xabc")).confirmed).toBe(false);
+  });
+});
+
+describe("checkOnce — payment binding (anti-replay)", () => {
+  const BOUND: ConfirmConfig = { ...CFG, payerFrom: OTHER, exactValueBaseUnits: "1000000" };
+
+  it("confirms when payer and exact value match the authorization", async () => {
+    mockRpc(goodReceipt());
+    expect((await checkOnce(BOUND, "0xabc")).confirmed).toBe(true);
+  });
+
+  it("REFUSES a transfer from a different payer (someone else's payment)", async () => {
+    const stranger = "0x4444444444444444444444444444444444444444";
+    mockRpc(
+      goodReceipt({
+        logs: [{ address: USDC, topics: [TRANSFER_TOPIC, topicFor(stranger), topicFor(VAULT)], data: word(1_000_000) }],
+      }),
+    );
+    expect((await checkOnce(BOUND, "0xabc")).confirmed).toBe(false);
+  });
+
+  it("REFUSES when the value differs from the authorized exact value", async () => {
+    mockRpc(
+      goodReceipt({
+        logs: [{ address: USDC, topics: [TRANSFER_TOPIC, topicFor(OTHER), topicFor(VAULT)], data: word(2_000_000) }],
+      }),
+    );
+    expect((await checkOnce(BOUND, "0xabc")).confirmed).toBe(false);
+  });
+
+  it("REFUSES non-standard Transfer data (not one 32-byte word)", async () => {
+    mockRpc(
+      goodReceipt({
+        logs: [{ address: USDC, topics: [TRANSFER_TOPIC, topicFor(OTHER), topicFor(VAULT)], data: "0xf4240" }],
+      }),
+    );
+    expect((await checkOnce(BOUND, "0xabc")).confirmed).toBe(false);
   });
 });

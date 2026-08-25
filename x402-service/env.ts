@@ -156,11 +156,15 @@ function enforceSafetyGates(cfg: X402Config): void {
           `[x402] free delivery from the vault. Not recommended for real funds.\n`,
       );
     }
-    if (cfg.facilitatorKind === "selfhosted" && !cfg.cdpUsdcAddress) {
+    // The built-in USDC default is Base MAINNET's contract. On any other
+    // network (base-sepolia, polygon, eip155:*, ...) that address is wrong and
+    // the on-chain confirm would never match a real transfer — require the
+    // operator to state the payment asset explicitly.
+    if (cfg.cdpNetwork !== "base" && !cfg.cdpUsdcAddress) {
       fail(
-        `\nrefusing to start: X402_FACILITATOR_KIND=selfhosted requires X402_USDC_ADDRESS\n` +
-          `(the payment-asset ERC-20 contract on your chosen chain). There is no safe\n` +
-          `default off Base — e.g. Ethereum Sepolia USDC differs from Base USDC.\n\n`,
+        `\nrefusing to start: X402_NETWORK=${cfg.cdpNetwork} requires X402_USDC_ADDRESS\n` +
+          `(the payment-asset ERC-20 contract on that chain). The built-in default is\n` +
+          `Base mainnet USDC and is only valid for X402_NETWORK=base.\n\n`,
       );
     }
     if (!cfg.liveAck) {

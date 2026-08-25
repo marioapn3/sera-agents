@@ -89,6 +89,15 @@ describe("fail-closed result handling (both kinds)", () => {
     }
   });
 
+  it("2xx with null/array/string bodies fails closed instead of throwing", async () => {
+    for (const resp of [null, [1, 2], "ok"]) {
+      capture(resp);
+      expect((await makeFacilitator(SELFHOSTED).verify("h", REQS)).isValid).toBe(false);
+      expect((await makeFacilitator(SELFHOSTED).settle("h", REQS)).success).toBe(false);
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("HTTP error and unreachable both fail closed", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 503, text: async () => "down" }) as any));
     expect((await makeFacilitator(SELFHOSTED).verify("h", REQS)).isValid).toBe(false);

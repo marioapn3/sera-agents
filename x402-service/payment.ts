@@ -24,7 +24,8 @@ import {
   type FacilitatorConfig,
   type PaymentRequirements,
 } from "./facilitator.js";
-import { confirmPaymentOnChain } from "./payment-confirm.js";
+import { checkOnce } from "./payment-confirm.js";
+import { parsePaymentAuthorization } from "./payment-binding.js";
 import type { SeraMcpClient } from "./sera-client.js";
 
 export interface VerifyOutcome {
@@ -139,6 +140,7 @@ export async function confirmPayment(
   cfg: X402Config,
   pending: PendingPayment,
   settleTxHash: string | undefined,
+  paymentAuthorizationHeader: string,
 ): Promise<ConfirmOutcome> {
   if (cfg.mode === "demo") return { ok: true, skipped: true };
   if (cfg.skipOnchainConfirm && !cfg.rpcUrl) return { ok: true, skipped: true };
@@ -147,13 +149,32 @@ export async function confirmPayment(
     // Facilitator claimed success but produced no tx hash — nothing to verify.
     return { ok: false, reason: "settle returned no txHash to confirm on-chain" };
   }
-  const result = await confirmPaymentOnChain(
+
+  // Anti-replay binding: the confirmation must prove THIS payer paid exactly
+  // what THIS payment's signed EIP-3009 authorization says, into the vault.
+  // An unparseable authorization is a hard reject — never pay out against a
+  // proof we cannot bind.
+  const auth = parsePaymentAuthorization(paymentAuthorizationHeader);
+  if (!auth) return { ok: false, reason: "payment authorization unparseable — cannot bind confirmation" };
+  const required = BigInt(String(Math.ceil(pending.amount_usdc * 1e6)));
+  if (auth.to !== cfg.vaultAddress!.toLowerCase()) {
+    return { ok: false, reason: "authorization recipient is not the vault" };
+  }
+  if (BigInt(auth.value) < required) {
+    return { ok: false, reason: "authorized value below required amount" };
+  }
+
+  // Single shot per request — the client drives retry cadence via 202s; no
+  // long in-handler poll to park connections on.
+  const result = await checkOnce(
     {
       rpcUrl: cfg.rpcUrl,
       asset: cfg.cdpUsdcAddress ?? "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
       vault: cfg.vaultAddress!,
-      minAmountBaseUnits: String(Math.ceil(pending.amount_usdc * 1e6)),
+      minAmountBaseUnits: required.toString(),
       confirmationDepth: cfg.confirmationDepth,
+      payerFrom: auth.from,
+      exactValueBaseUnits: auth.value,
     },
     settleTxHash,
   );
@@ -231,6 +252,17 @@ export function transitionToDelivered(
   return store.cas(pending.payment_id, "executing", "delivered", {
     delivered_payload: deliveredPayload,
     settlement_payload: settlementPayload,
+  });
+}
+
+/** Facilitator /settle failed: no USDC charged — terminal, NOT refundable. */
+export function transitionToSettleFailed(
+  store: StateStore,
+  pending: PendingPayment,
+  error: string,
+): boolean {
+  return store.cas(pending.payment_id, "verified", "settle_failed", {
+    last_error: error,
   });
 }
 

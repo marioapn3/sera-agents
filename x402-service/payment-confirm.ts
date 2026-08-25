@@ -9,8 +9,9 @@
  * OPERATOR controls, that the settle transaction:
  *
  *   1. exists and succeeded (receipt status 0x1),
- *   2. emitted an ERC-20 Transfer of the payment asset TO the vault address
- *      with value >= the required amount,
+ *   2. emitted an ERC-20 Transfer of the payment asset TO the vault address —
+ *      and, when binding is supplied (live mode always supplies it), FROM the
+ *      authorized payer with EXACTLY the authorized value,
  *   3. is buried under >= confirmationDepth blocks.
  *
  * Fail-closed: any RPC error, missing receipt, wrong recipient, short value,
@@ -31,6 +32,14 @@ export interface ConfirmConfig {
   /** Minimum acceptable value in token base units (decimal string). */
   minAmountBaseUnits: string;
   confirmationDepth: number;
+  /**
+   * Binding to THIS payment's signed EIP-3009 authorization (anti-replay):
+   * the Transfer must originate from `payerFrom` and move exactly
+   * `exactValueBaseUnits`. Without binding, any sufficiently large transfer
+   * into the vault would qualify — including someone else's.
+   */
+  payerFrom?: string;
+  exactValueBaseUnits?: string;
 }
 
 export interface ConfirmResult {
@@ -87,13 +96,23 @@ export async function checkOnce(cfg: ConfirmConfig, txHash: string): Promise<Con
     const wantVault = addressTopic(cfg.vault);
     const need = BigInt(cfg.minAmountBaseUnits);
 
+    const wantFrom = cfg.payerFrom ? addressTopic(cfg.payerFrom) : undefined;
+    const exact = cfg.exactValueBaseUnits !== undefined ? BigInt(cfg.exactValueBaseUnits) : undefined;
+
     const paid = (receipt.logs ?? []).some((log) => {
       if (normalizeAddress(log.address ?? "") !== wantAsset) return false;
       const t = log.topics ?? [];
       if (t.length < 3 || t[0] !== TRANSFER_TOPIC) return false;
       if (normalizeAddress(t[2] ?? "") !== wantVault) return false;
+      if (wantFrom && normalizeAddress(t[1] ?? "") !== wantFrom) return false;
+      // Standard ERC-20 Transfer data is exactly one 32-byte word. Refuse
+      // anything else rather than guessing at non-standard layouts.
+      const data = (log.data ?? "").toLowerCase();
+      if (!/^0x[0-9a-f]{64}$/.test(data)) return false;
       try {
-        return BigInt(log.data ?? "0x0") >= need;
+        const value = BigInt(data);
+        if (exact !== undefined && value !== exact) return false;
+        return value >= need;
       } catch {
         return false;
       }
