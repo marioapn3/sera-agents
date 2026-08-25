@@ -32,7 +32,7 @@ const DOMAIN = {
 };
 const NETWORK = "eip155:11155111";
 const VAULT = "0x000000000000000000000000000000000000bEEF";
-const PAYER_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+const PAYER_PK = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
 const NOW = 1_800_000_000;
 
 function authFor(from: string) {
@@ -56,9 +56,9 @@ function serverParse(header: string) {
 
 describe("x402 client ↔ server contract", () => {
   it("a buyer-signed payment round-trips through the server parser + verifier", async () => {
-    const payer = privateKeyToAccount(PAYER_KEY);
+    const payer = privateKeyToAccount(PAYER_PK);
     const auth = authFor(payer.address);
-    const { signature, authorization } = await signTransferAuthorization(PAYER_KEY, auth, DOMAIN);
+    const { signature, authorization } = await signTransferAuthorization(PAYER_PK, auth, DOMAIN);
 
     const header = buildXPaymentHeader(
       "pay_abc123",
@@ -77,11 +77,11 @@ describe("x402 client ↔ server contract", () => {
   });
 
   it("a wrong-domain signature is rejected by the server (LOW-1 fail-closed)", async () => {
-    const payer = privateKeyToAccount(PAYER_KEY);
+    const payer = privateKeyToAccount(PAYER_PK);
     const auth = authFor(payer.address);
     // Buyer signs over a DIFFERENT domain (e.g. mainnet-USDC name) than the
     // server verifies — the recovered signer won't match → reject, no payout.
-    const { signature, authorization } = await signTransferAuthorization(PAYER_KEY, auth, {
+    const { signature, authorization } = await signTransferAuthorization(PAYER_PK, auth, {
       ...DOMAIN,
       name: "USD Coin",
     });
@@ -100,7 +100,7 @@ describe("x402 client ↔ server contract", () => {
     // Guards the harness itself: you can't accidentally build a forged-`from`
     // payment that the server would just reject anyway.
     const notMine = authFor("0x000000000000000000000000000000000000dEaD");
-    await expect(signTransferAuthorization(PAYER_KEY, notMine, DOMAIN)).rejects.toThrow(
+    await expect(signTransferAuthorization(PAYER_PK, notMine, DOMAIN)).rejects.toThrow(
       /does not match/,
     );
   });
