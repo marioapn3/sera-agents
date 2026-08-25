@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "e2e:sepolia": "node scripts/sepolia-e2e.mjs",
     "audit": "npm audit --omit=dev --audit-level=high"
   },
   "dependencies": {

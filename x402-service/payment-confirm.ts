@@ -20,8 +20,7 @@
  */
 
 // keccak256("Transfer(address,address,uint256)")
-const TRANSFER_TOPIC =
-  "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 
 export interface ConfirmConfig {
   rpcUrl: string;
@@ -83,7 +82,9 @@ function addressTopic(a: string): string {
 
 /**
  * Check the receipt of `txHash` for a qualifying Transfer into the vault.
- * Single pass — callers poll via confirmPaymentOnChain.
+ * Single pass, pure read: the caller (server confirm gate) invokes this once
+ * on the verified→executing edge and fails closed if it doesn't pass; request
+ * retries re-drive it safely since delivery stays blocked until it confirms.
  */
 export async function checkOnce(cfg: ConfirmConfig, txHash: string): Promise<ConfirmResult> {
   try {
@@ -97,7 +98,8 @@ export async function checkOnce(cfg: ConfirmConfig, txHash: string): Promise<Con
     const need = BigInt(cfg.minAmountBaseUnits);
 
     const wantFrom = cfg.payerFrom ? addressTopic(cfg.payerFrom) : undefined;
-    const exact = cfg.exactValueBaseUnits !== undefined ? BigInt(cfg.exactValueBaseUnits) : undefined;
+    const exact =
+      cfg.exactValueBaseUnits !== undefined ? BigInt(cfg.exactValueBaseUnits) : undefined;
 
     const paid = (receipt.logs ?? []).some((log) => {
       if (normalizeAddress(log.address ?? "") !== wantAsset) return false;
@@ -120,7 +122,8 @@ export async function checkOnce(cfg: ConfirmConfig, txHash: string): Promise<Con
     if (!paid) {
       return {
         confirmed: false,
-        reason: "no qualifying Transfer to vault found in receipt (asset/recipient/amount mismatch)",
+        reason:
+          "no qualifying Transfer to vault found in receipt (asset/recipient/amount mismatch)",
       };
     }
 
@@ -137,27 +140,5 @@ export async function checkOnce(cfg: ConfirmConfig, txHash: string): Promise<Con
   } catch (e: any) {
     // Fail-closed on any RPC/parse error.
     return { confirmed: false, reason: `confirmation check failed: ${e?.message ?? String(e)}` };
-  }
-}
-
-/**
- * Poll checkOnce until confirmed or the time budget runs out. The check is a
- * pure read — safe to repeat on request retries; delivery stays blocked until
- * it passes.
- */
-export async function confirmPaymentOnChain(
-  cfg: ConfirmConfig,
-  txHash: string,
-  opts: { timeoutMs?: number; intervalMs?: number } = {},
-): Promise<ConfirmResult> {
-  const timeoutMs = opts.timeoutMs ?? 60_000;
-  const intervalMs = opts.intervalMs ?? 3_000;
-  const deadline = Date.now() + timeoutMs;
-  let last: ConfirmResult = { confirmed: false, reason: "not checked" };
-  for (;;) {
-    last = await checkOnce(cfg, txHash);
-    if (last.confirmed) return last;
-    if (Date.now() + intervalMs > deadline) return last;
-    await new Promise((r) => setTimeout(r, intervalMs));
   }
 }

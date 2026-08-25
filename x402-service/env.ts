@@ -28,7 +28,7 @@ export interface X402Config {
   facilitatorToken?: string; // selfhosted only: optional static bearer for your facilitator
   cdpApiKeyId?: string;
   cdpApiKeySecret?: string;
-  cdpNetwork: string;        // cdp: base | base-sepolia | ... | selfhosted: any (e.g. eip155:11155111)
+  cdpNetwork: string; // cdp: base | base-sepolia | ... | selfhosted: any (e.g. eip155:11155111)
   cdpUsdcAddress?: string;
   confirmationDepth: number; // k≥3 on Base mainnet (per arXiv:2605.11781)
   // On-chain confirmation gate (live mode): independently verify the payment
@@ -39,16 +39,16 @@ export interface X402Config {
   // EIP-712 domain for verifying the payer's EIP-3009 signature (makes `from`
   // un-forgeable). chainId is derived from network / X402_CHAIN_ID.
   chainId?: number;
-  usdcName: string;    // EIP-712 domain name of the payment token (USDC default)
+  usdcName: string; // EIP-712 domain name of the payment token (USDC default)
   usdcVersion: string; // EIP-712 domain version
   // Operator gates
-  liveAck: boolean;          // set true to acknowledge wired-but-not-production-tested live mode
+  liveAck: boolean; // set true to acknowledge wired-but-not-production-tested live mode
 }
 
 export function loadConfig(): X402Config {
   const port = Number(process.env.PORT ?? 8402);
   const host = process.env.HOST ?? "127.0.0.1";
-  const mode = ((process.env.X402_MODE ?? "demo").toLowerCase() as Mode);
+  const mode = (process.env.X402_MODE ?? "demo").toLowerCase() as Mode;
   if (mode !== "demo" && mode !== "live") {
     throw new Error(`X402_MODE must be 'demo' or 'live' (got '${process.env.X402_MODE}')`);
   }
@@ -104,8 +104,7 @@ export function loadConfig(): X402Config {
 }
 
 function enforceSafetyGates(cfg: X402Config): void {
-  const isLocalHost =
-    cfg.host === "127.0.0.1" || cfg.host === "localhost" || cfg.host === "::1";
+  const isLocalHost = cfg.host === "127.0.0.1" || cfg.host === "localhost" || cfg.host === "::1";
 
   // Demo on public host without explicit ack → refuse.
   if (cfg.mode === "demo" && !isLocalHost && !cfg.demoPublicOk) {
@@ -192,6 +191,28 @@ function enforceSafetyGates(cfg: X402Config): void {
         `\nrefusing to start: cannot derive an EVM chainId for X402_NETWORK=${cfg.cdpNetwork}.\n` +
           `The chainId is needed to verify the payer's EIP-3009 signature. Set\n` +
           `X402_CHAIN_ID=<id> (e.g. 11155111 for Ethereum Sepolia, 8453 for Base).\n\n`,
+      );
+    }
+    // Footgun guard: the EIP-712 domain name/version must match the payment
+    // token's on-chain domain, or EVERY legit signature recovers a wrong
+    // address and silently bounces (fail-closed → no payment ever succeeds).
+    // The defaults ("USD Coin"/"2") are Base/mainnet-USDC's values; other
+    // deployments differ (some use name "USDC" or version "1"). We can't know
+    // the right values, so warn loudly rather than guess when the confirm gate
+    // is active on a non-base chain and the operator left them at the default.
+    if (
+      cfg.rpcUrl &&
+      cfg.cdpNetwork !== "base" &&
+      process.env.X402_USDC_NAME === undefined &&
+      process.env.X402_USDC_VERSION === undefined
+    ) {
+      process.stderr.write(
+        `[x402] WARNING: X402_NETWORK=${cfg.cdpNetwork} but X402_USDC_NAME / X402_USDC_VERSION\n` +
+          `[x402] are unset — using Base-USDC defaults ("${cfg.usdcName}"/"${cfg.usdcVersion}"). If the\n` +
+          `[x402] payment token's real EIP-712 domain differs, EVERY payment's signature\n` +
+          `[x402] will fail verification and NO payment will succeed. Confirm the token's\n` +
+          `[x402] on-chain name()/version() and set these explicitly. A green testnet E2E\n` +
+          `[x402] (a real payment that SUCCEEDS) is the only proof the domain is correct.\n`,
       );
     }
     if (!cfg.liveAck) {
