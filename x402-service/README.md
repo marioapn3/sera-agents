@@ -199,7 +199,13 @@ Selected vars (full list in `.env.example`):
 
 ## Remaining gate before mainnet flip
 
-**Base Sepolia E2E verification.** Trigger 402 → pay USDC on Sepolia → confirm `tx_hash` + delivery via Sera Sepolia. Inspect facilitator response shapes; refine `authHeader()` in `facilitator.ts` if CDP requires HMAC-SHA256 JWT instead of the current `Bearer ${id}:${secret}` form. Then switch `X402_NETWORK=base`.
+**Live testnet E2E verification** — see [`E2E-SEPOLIA.md`](./E2E-SEPOLIA.md) for the full runbook. Every payment check is fail-closed, so only a *real* payment that **succeeds** proves the EIP-712 USDC domain (`X402_USDC_NAME`/`_VERSION`) is right — a mismatch silently rejects every payment. Run:
+
+```bash
+npm run e2e:sepolia   # proofs 1 (succeeds), 2 (depth≥3), 4 (forged-from rejected); env-gated
+```
+
+against a running live-mode service + self-hosted facilitator on Ethereum Sepolia (`eip155:11155111`). Proof 3 (cross-payment `txHash` replay + restart persistence) is facilitator/restart-orchestrated in the runbook. The fragile client↔server crypto contract is also checked with no infra in CI (`test/e2e-client-contract.test.ts`). Keep `X402_RPC_URL` set and never `X402_SKIP_ONCHAIN_CONFIRM=true` in production. Then switch `X402_NETWORK`/`X402_CHAIN_ID` to your settlement mainnet.
 
 ## What's not built yet
 

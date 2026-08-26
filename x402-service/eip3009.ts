@@ -52,10 +52,12 @@ export async function verifyTransferAuthorization(
   nowSeconds: number,
 ): Promise<SignatureCheck> {
   try {
-    if (!/^0x[0-9a-fA-F]+$/.test(signature) || (signature.length !== 132 && signature.length < 132)) {
-      // 65-byte sig = 0x + 130 hex chars = 132; allow longer (some encoders) but not shorter.
-      if (signature.length < 132) return { ok: false, reason: "signature too short" };
-    }
+    if (!/^0x[0-9a-fA-F]+$/.test(signature)) return { ok: false, reason: "signature must be hex" };
+    // 65-byte sig = 0x + 130 hex chars = 132; longer is tolerated (some encoders
+    // append), shorter is rejected. Note this also rejects EIP-2098 compact
+    // 64-byte signatures (130 chars) — a known limitation, not a security gap
+    // (fail-closed). Add compact-sig support here if a client ever needs it.
+    if (signature.length < 132) return { ok: false, reason: "signature too short" };
     if (!HEX32.test(auth.nonce)) return { ok: false, reason: "nonce must be bytes32" };
 
     // Time window (defense in depth; the chain also enforces validBefore).
@@ -99,6 +101,9 @@ export async function verifyTransferAuthorization(
     }
     return { ok: true };
   } catch (e: any) {
-    return { ok: false, reason: `signature verification failed: ${e?.shortMessage ?? e?.message ?? String(e)}` };
+    return {
+      ok: false,
+      reason: `signature verification failed: ${e?.shortMessage ?? e?.message ?? String(e)}`,
+    };
   }
 }
