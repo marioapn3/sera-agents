@@ -8,6 +8,7 @@
     "start": "tsx agent.ts",
     "dry-run": "MM_DRY_RUN=true tsx agent.ts",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
     "audit": "npm audit --omit=dev --audit-level=high"
   },
   "dependencies": {
@@ -16,6 +17,7 @@
   "devDependencies": {
     "@types/node": "^22.7.5",
     "tsx": "^4.0.0",
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "vitest": "^4.1.9"
   }
 }

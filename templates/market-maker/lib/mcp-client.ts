@@ -25,6 +25,7 @@ export interface SeraMcpClient {
 
 export async function startSeraMcp(opts: SeraMcpClientOptions): Promise<SeraMcpClient> {
   let proc: ChildProcessWithoutNullStreams | null = null;
+  let initialized = false;
   let reqId = 0;
   const pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
   const requestTimeout = opts.requestTimeoutMs ?? 30_000;
@@ -82,12 +83,19 @@ export async function startSeraMcp(opts: SeraMcpClientOptions): Promise<SeraMcpC
       process.stderr.write(`[mcp] exited code=${code}\n`);
       for (const [, h] of pending) h.reject(new Error("mcp subprocess exited"));
       pending.clear();
-      proc = null;
+      // A killed process's `exit` event fires asynchronously and can land
+      // after ensureConnected() has already spawned its replacement — guard
+      // against a stale event from a superseded process clobbering the
+      // reference to the one that's actually running now.
+      if (proc === p) {
+        proc = null;
+        initialized = false;
+      }
     });
     return p;
   }
 
-  function rpc(method: string, params: unknown = {}): Promise<any> {
+  function sendRpc(method: string, params: unknown = {}): Promise<any> {
     if (!proc) throw new Error("mcp not running");
     const id = ++reqId;
     const payload = `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`;
@@ -103,18 +111,34 @@ export async function startSeraMcp(opts: SeraMcpClientOptions): Promise<SeraMcpC
     });
   }
 
-  // Boot + handshake.
-  proc = start();
-  await new Promise((r) => setTimeout(r, 250));
-  await rpc("initialize", {
-    protocolVersion: "2024-11-05",
-    capabilities: {},
-    clientInfo: { name: "sera-market-maker", version: "0.2.0" },
-  });
+  // Connects (if needed) and completes the initialize handshake (if not done
+  // yet on this process). Called before every tool/rpc call, not just at
+  // startup — a subprocess crash mid-run (OOM, transient failure, ...) resets
+  // `proc`/`initialized` via the exit handler above, and without re-checking
+  // here every call after that would fail forever with "mcp not running"
+  // instead of recovering, silently wedging a long-running caller like
+  // market-maker's poll loop.
+  async function ensureConnected(): Promise<void> {
+    if (!proc) {
+      proc = start();
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    if (!initialized) {
+      await sendRpc("initialize", {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "sera-market-maker", version: "0.2.0" },
+      });
+      initialized = true;
+    }
+  }
+
+  await ensureConnected();
 
   return {
     async tool<T>(name: string, args: Record<string, unknown> = {}): Promise<T> {
-      const r = await rpc("tools/call", { name, arguments: args });
+      await ensureConnected();
+      const r = await sendRpc("tools/call", { name, arguments: args });
       if (r?.isError) {
         throw new Error(`${name}: ${r.content?.[0]?.text ?? "tool error"}`);
       }
@@ -126,11 +150,15 @@ export async function startSeraMcp(opts: SeraMcpClientOptions): Promise<SeraMcpC
         return text as unknown as T;
       }
     },
-    rpc,
+    async rpc(method: string, params?: unknown) {
+      await ensureConnected();
+      return sendRpc(method, params);
+    },
     close() {
       if (proc) {
         proc.kill();
         proc = null;
+        initialized = false;
       }
     },
     running() {
