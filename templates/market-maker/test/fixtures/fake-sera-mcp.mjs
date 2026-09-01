@@ -16,8 +16,24 @@
 // so a concurrent duplicate still gets rejected below) — for tests that
 // need a handshake response to arrive after the caller has already moved
 // on (e.g. closed the connection).
+//
+// FAKE_MCP_FAIL_INIT (optional): "error" responds to `initialize` with a
+// JSON-RPC error; "hang" never responds at all (pair with a short
+// requestTimeoutMs client-side) — for tests that need the handshake itself
+// to fail, e.g. to confirm the client kills the subprocess rather than
+// orphaning it.
+//
+// FAKE_MCP_PIDFILE (optional): if set, this process writes its own pid to
+// that path on startup, so a test can independently confirm afterward
+// whether the process is still alive.
+import { writeFileSync } from "node:fs";
+
 let buf = "";
 let initialized = false;
+
+if (process.env.FAKE_MCP_PIDFILE) {
+  writeFileSync(process.env.FAKE_MCP_PIDFILE, String(process.pid));
+}
 
 const exitDelayMs = Number(process.env.FAKE_MCP_EXIT_DELAY_MS ?? 0);
 if (exitDelayMs > 0) {
@@ -27,6 +43,7 @@ if (exitDelayMs > 0) {
 }
 
 const initDelayMs = Number(process.env.FAKE_MCP_INIT_DELAY_MS ?? 0);
+const failInit = process.env.FAKE_MCP_FAIL_INIT; // "error" | "hang" | undefined
 
 function respond(id, result) {
   process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
@@ -53,6 +70,13 @@ process.stdin.on("data", (chunk) => {
     if (msg.method === "initialize") {
       if (initialized) {
         respondError(msg.id, "already initialized");
+        continue;
+      }
+      if (failInit === "hang") {
+        continue; // never respond — client-side requestTimeoutMs should fire
+      }
+      if (failInit === "error") {
+        respondError(msg.id, "init failed");
         continue;
       }
       initialized = true;

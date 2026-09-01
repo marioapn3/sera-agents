@@ -1,8 +1,33 @@
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { startSeraMcp } from "../lib/mcp-client.js";
 
 const fixturePath = fileURLToPath(new URL("./fixtures/fake-sera-mcp.mjs", import.meta.url));
+
+async function waitUntil(
+  predicate: () => boolean,
+  timeoutMs = 3000,
+  intervalMs = 20,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  if (!predicate()) throw new Error("waitUntil: condition not met in time");
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 describe("startSeraMcp", () => {
   it("connects and completes the initialize handshake", async () => {
@@ -176,4 +201,77 @@ describe("startSeraMcp", () => {
       mcp.close();
     }
   }, 15_000);
+
+  /**
+   * Regression test for a review finding: on a failed/timed-out handshake,
+   * doConnect() used to null out `conn` without ever killing the process it
+   * had just spawned — a child that returned an init error (or never
+   * responded) but stayed alive would leak indefinitely, still holding
+   * SERA_API_KEY/SECRET.
+   */
+  it("kills the subprocess and rejects when initialize errors, leaving nothing orphaned", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "fake-mcp-"));
+    const pidFile = join(dir, "pid");
+    await expect(
+      startSeraMcp({
+        mcpPath: fixturePath,
+        env: { FAKE_MCP_FAIL_INIT: "error", FAKE_MCP_PIDFILE: pidFile },
+      }),
+    ).rejects.toThrow();
+
+    await waitUntil(() => existsSync(pidFile));
+    const pid = Number(readFileSync(pidFile, "utf8"));
+    await waitUntil(() => !isAlive(pid));
+  });
+
+  it("kills the subprocess and rejects when initialize times out, leaving nothing orphaned", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "fake-mcp-"));
+    const pidFile = join(dir, "pid");
+    await expect(
+      startSeraMcp({
+        mcpPath: fixturePath,
+        env: { FAKE_MCP_FAIL_INIT: "hang", FAKE_MCP_PIDFILE: pidFile },
+        requestTimeoutMs: 200,
+      }),
+    ).rejects.toThrow(/timeout/);
+
+    await waitUntil(() => existsSync(pidFile));
+    const pid = Number(readFileSync(pidFile, "utf8"));
+    await waitUntil(() => !isAlive(pid));
+  });
+
+  /**
+   * Regression test for a review finding: a reconnect attempt superseded
+   * mid-flight (by close(), here) used to resolve successfully anyway once
+   * its post-spawn-delay check saw it had been superseded — its caller
+   * would then proceed to send tools/call through whatever `conn` a LATER,
+   * unrelated caller had since spawned, potentially before that replacement
+   * had even finished its own handshake. A superseded attempt must reject
+   * instead, and each caller must send its request through the exact
+   * Connection its own ensureConnected() call resolved with.
+   */
+  it("rejects a superseded reconnect attempt instead of resolving it against a different generation", async () => {
+    const mcp = await startSeraMcp({ mcpPath: fixturePath });
+    try {
+      await expect(mcp.tool("sera.crash_now")).rejects.toThrow(/mcp subprocess exited/);
+
+      // Reconnect A starts (spawns a replacement) — don't await it yet.
+      const callerA = mcp.tool<{ pid: number }>("sera.echo_pid");
+
+      // Supersede it immediately, synchronously, while A is still inside
+      // its post-spawn 250ms delay (before it has even sent `initialize`).
+      mcp.close();
+
+      // A must reject as superseded — never resolve using whatever
+      // generation happens to be active by the time it settles.
+      await expect(callerA).rejects.toThrow(/superseded/);
+
+      // A fresh caller gets its own connection with its own real handshake.
+      const callerB = await mcp.tool<{ pid: number }>("sera.echo_pid");
+      expect(typeof callerB.pid).toBe("number");
+      expect(mcp.running()).toBe(true);
+    } finally {
+      mcp.close();
+    }
+  }, 10_000);
 });
