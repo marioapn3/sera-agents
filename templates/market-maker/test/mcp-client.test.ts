@@ -126,4 +126,54 @@ describe("startSeraMcp", () => {
       mcp.close();
     }
   }, 10_000);
+
+  /**
+   * Regression test for a review finding: `initialized` was a variable
+   * shared across every generation rather than living on the Connection
+   * object. Sequence: a reconnect spawns a replacement and sends its
+   * `initialize`; close() supersedes that generation (conn = null) before
+   * the (delayed) response arrives; the response then lands and used to
+   * set the *global* `initialized = true`, which a later, completely
+   * unrelated generation would then see and skip its own handshake —
+   * sending tools/call to a process that was never actually initialized.
+   * The fixture rejects tools/call before its own `initialize`, so this
+   * surfaces as the exact "not initialized" error the reviewer reported.
+   */
+  it("a delayed init response after close() during reconnect can't skip the next generation's handshake", async () => {
+    const mcp = await startSeraMcp({
+      mcpPath: fixturePath,
+      // Every generation this client spawns (including the very first)
+      // delays its initialize response and, once killed, delays its own
+      // exit — both needed to land the response for a closed generation
+      // after close() has already run.
+      env: { FAKE_MCP_INIT_DELAY_MS: "300", FAKE_MCP_EXIT_DELAY_MS: "500" },
+    });
+    try {
+      const before = await mcp.tool<{ pid: number }>("sera.echo_pid");
+      await expect(mcp.tool("sera.crash_now")).rejects.toThrow(/mcp subprocess exited/);
+
+      // Reconnect starts (spawns a replacement, sends its initialize) but
+      // don't await it — close() below supersedes it mid-handshake.
+      const reconnecting = mcp.tool<{ pid: number }>("sera.echo_pid");
+
+      // Land after the replacement's initialize has been sent (~250ms spawn
+      // delay) but before its 300ms-delayed response arrives.
+      await new Promise((r) => setTimeout(r, 350));
+      mcp.close();
+      await expect(reconnecting).rejects.toThrow();
+
+      // Let the closed generation's delayed initialize response (and its
+      // own delayed exit) land in the background.
+      await new Promise((r) => setTimeout(r, 700));
+
+      // A fresh call must do its own real handshake on a brand new
+      // generation — not skip `initialize` because of a stale flag left
+      // over from the closed generation's late response.
+      const after = await mcp.tool<{ pid: number }>("sera.echo_pid");
+      expect(after.pid).not.toBe(before.pid);
+      expect(mcp.running()).toBe(true);
+    } finally {
+      mcp.close();
+    }
+  }, 15_000);
 });

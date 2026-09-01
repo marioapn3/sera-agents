@@ -28,15 +28,21 @@ interface PendingEntry {
   reject: (e: any) => void;
 }
 
-/** One spawned sera-mcp subprocess generation and the requests in flight on it. */
+/**
+ * One spawned sera-mcp subprocess generation: its own process, its own
+ * in-flight requests, and its own handshake state. `initialized` lives here
+ * (not as a variable shared across generations) so a delayed response
+ * belonging to a superseded generation can never be mistaken for the
+ * currently-active one having completed its handshake.
+ */
 interface Connection {
   proc: ChildProcessWithoutNullStreams;
   pending: Map<number, PendingEntry>;
+  initialized: boolean;
 }
 
 export async function startSeraMcp(opts: SeraMcpClientOptions): Promise<SeraMcpClient> {
   let conn: Connection | null = null;
-  let initialized = false;
   let reqId = 0;
   // Serializes concurrent (re)connect attempts so a crash mid-run doesn't let
   // several simultaneous tool()/rpc() callers each spawn/initialize their own
@@ -70,11 +76,11 @@ export async function startSeraMcp(opts: SeraMcpClientOptions): Promise<SeraMcpC
     }
     const env: NodeJS.ProcessEnv = { ...base, ...opts.env };
     const p = spawn("node", [opts.mcpPath], { env, stdio: ["pipe", "pipe", "pipe"] });
-    // Each generation gets its own pending map. A crashed process's exit
-    // handler must only ever touch requests it is actually holding — never a
-    // replacement process's in-flight requests — so this can't be the single
-    // outer-scoped map every generation shared before.
+    // Each generation gets its own pending map. A crashed/closed process's
+    // exit handler must only ever touch requests it is actually holding —
+    // never a replacement process's in-flight requests.
     const pending = new Map<number, PendingEntry>();
+    const connection: Connection = { proc: p, pending, initialized: false };
     let buf = "";
     p.stdout.on("data", (chunk) => {
       buf += chunk.toString("utf8");
@@ -108,60 +114,85 @@ export async function startSeraMcp(opts: SeraMcpClientOptions): Promise<SeraMcpC
       // after ensureConnected() already spawned + swapped in a replacement —
       // guard against a stale event from a superseded generation clobbering
       // the currently-active connection.
-      if (conn?.proc === p) {
+      if (conn === connection) {
         conn = null;
-        initialized = false;
       }
     });
-    return { proc: p, pending };
+    return connection;
   }
 
-  function sendRpc(method: string, params: unknown = {}): Promise<any> {
-    if (!conn) throw new Error("mcp not running");
-    const { proc, pending } = conn;
+  function sendRpcOn(target: Connection, method: string, params: unknown = {}): Promise<any> {
     const id = ++reqId;
     const payload = `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`;
     return new Promise((resolve, reject) => {
-      pending.set(id, { resolve, reject });
-      proc.stdin.write(payload);
+      target.pending.set(id, { resolve, reject });
+      target.proc.stdin.write(payload);
       setTimeout(() => {
-        if (pending.has(id)) {
-          pending.delete(id);
+        if (target.pending.has(id)) {
+          target.pending.delete(id);
           reject(new Error(`mcp ${method} timeout after ${requestTimeout}ms`));
         }
       }, requestTimeout);
     });
   }
 
+  function sendRpc(method: string, params: unknown = {}): Promise<any> {
+    if (!conn) throw new Error("mcp not running");
+    return sendRpcOn(conn, method, params);
+  }
+
   async function doConnect(): Promise<void> {
-    if (!conn) {
-      conn = spawnConnection();
+    // Capture the generation this attempt is working on. `conn` is mutable
+    // shared state — if close() (or a crash) supersedes it while we're
+    // spawning/handshaking, every check below must notice and back off
+    // instead of mutating state that no longer belongs to the active
+    // connection.
+    let target = conn;
+    if (!target) {
+      target = spawnConnection();
+      conn = target;
       await new Promise((r) => setTimeout(r, 250));
+      if (conn !== target) return; // superseded during the spawn delay
     }
-    if (!initialized) {
-      await sendRpc("initialize", {
+    if (target.initialized) return;
+    try {
+      await sendRpcOn(target, "initialize", {
         protocolVersion: "2024-11-05",
         capabilities: {},
         clientInfo: { name: "sera-market-maker", version: "0.2.0" },
       });
-      initialized = true;
+    } catch (e) {
+      // Handshake failed (subprocess died, timed out, ...) — discard this
+      // generation so the next ensureConnected() starts a clean respawn
+      // rather than reusing a half-initialized connection. Only touch
+      // `conn` if this generation is still the active one.
+      if (conn === target) conn = null;
+      throw e;
+    }
+    // Only mark *this* generation initialized if it's still the active one.
+    // A delayed `initialize` response that arrives after close()/a crash
+    // superseded it must not be mistaken for the current connection (or
+    // whatever generation happens to be current by then) being ready.
+    if (conn === target) {
+      target.initialized = true;
     }
   }
 
   // Connects (if needed) and completes the initialize handshake (if not done
   // yet on this generation). Called before every tool/rpc call, not just at
-  // startup — a subprocess crash mid-run resets `conn`/`initialized` via the
-  // exit handler above, and without re-checking here every call after that
-  // would fail forever with "mcp not running" instead of recovering, silently
-  // wedging a long-running caller like market-maker's poll loop. Concurrent
-  // callers share one in-flight `connectPromise` rather than each racing
-  // their own spawn + `initialize`.
+  // startup — a subprocess crash mid-run resets `conn` via the exit handler
+  // above, and without re-checking here every call after that would fail
+  // forever with "mcp not running" instead of recovering, silently wedging a
+  // long-running caller like market-maker's poll loop. Concurrent callers
+  // share one in-flight `connectPromise` rather than each racing their own
+  // spawn + `initialize`.
   function ensureConnected(): Promise<void> {
-    if (conn && initialized) return Promise.resolve();
+    if (conn?.initialized) return Promise.resolve();
     if (!connectPromise) {
-      connectPromise = doConnect().finally(() => {
-        connectPromise = null;
+      const attempt: Promise<void> = doConnect().finally(() => {
+        if (connectPromise === attempt) connectPromise = null;
       });
+      connectPromise = attempt;
     }
     return connectPromise;
   }
@@ -191,8 +222,11 @@ export async function startSeraMcp(opts: SeraMcpClientOptions): Promise<SeraMcpC
       if (conn) {
         conn.proc.kill();
         conn = null;
-        initialized = false;
       }
+      // Drop any in-flight (re)connect attempt too — a caller after close()
+      // must start a fresh spawn, not await a handshake for the generation
+      // we just killed.
+      connectPromise = null;
     },
     running() {
       return !!conn;

@@ -10,6 +10,12 @@
 // FAKE_MCP_EXIT_DELAY_MS (optional): if set, delays process exit on SIGTERM
 // by that many ms, for tests that need a killed process's `exit` event to
 // land well after a replacement has already been spawned and used.
+//
+// FAKE_MCP_INIT_DELAY_MS (optional): if set, delays the `initialize`
+// *response* by that many ms (the request is still accepted immediately,
+// so a concurrent duplicate still gets rejected below) — for tests that
+// need a handshake response to arrive after the caller has already moved
+// on (e.g. closed the connection).
 let buf = "";
 let initialized = false;
 
@@ -19,6 +25,8 @@ if (exitDelayMs > 0) {
     setTimeout(() => process.exit(0), exitDelayMs);
   });
 }
+
+const initDelayMs = Number(process.env.FAKE_MCP_INIT_DELAY_MS ?? 0);
 
 function respond(id, result) {
   process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
@@ -48,14 +56,22 @@ process.stdin.on("data", (chunk) => {
         continue;
       }
       initialized = true;
-      respond(msg.id, {
-        protocolVersion: "2024-11-05",
-        capabilities: { tools: {} },
-        serverInfo: { name: "fake-sera-mcp", version: "0.0.0" },
-      });
+      const sendInitResult = () => {
+        respond(msg.id, {
+          protocolVersion: "2024-11-05",
+          capabilities: { tools: {} },
+          serverInfo: { name: "fake-sera-mcp", version: "0.0.0" },
+        });
+      };
+      if (initDelayMs > 0) setTimeout(sendInitResult, initDelayMs);
+      else sendInitResult();
       continue;
     }
     if (msg.method === "tools/call") {
+      if (!initialized) {
+        respondError(msg.id, "not initialized");
+        continue;
+      }
       const name = msg.params?.name;
       if (name === "sera.crash_now") {
         process.exit(1);
