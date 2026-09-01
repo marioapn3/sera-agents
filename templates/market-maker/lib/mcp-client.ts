@@ -23,11 +23,25 @@ export interface SeraMcpClient {
   running(): boolean;
 }
 
+interface PendingEntry {
+  resolve: (v: any) => void;
+  reject: (e: any) => void;
+}
+
+/** One spawned sera-mcp subprocess generation and the requests in flight on it. */
+interface Connection {
+  proc: ChildProcessWithoutNullStreams;
+  pending: Map<number, PendingEntry>;
+}
+
 export async function startSeraMcp(opts: SeraMcpClientOptions): Promise<SeraMcpClient> {
-  let proc: ChildProcessWithoutNullStreams | null = null;
+  let conn: Connection | null = null;
   let initialized = false;
   let reqId = 0;
-  const pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
+  // Serializes concurrent (re)connect attempts so a crash mid-run doesn't let
+  // several simultaneous tool()/rpc() callers each spawn/initialize their own
+  // subprocess — every caller awaits this single in-flight attempt instead.
+  let connectPromise: Promise<void> | null = null;
   const requestTimeout = opts.requestTimeoutMs ?? 30_000;
 
   // Forward only what the sera-mcp child legitimately needs — never spread the
@@ -49,13 +63,18 @@ export async function startSeraMcp(opts: SeraMcpClientOptions): Promise<SeraMcpC
     "SERA_API_SECRET",
   ];
 
-  function start() {
+  function spawnConnection(): Connection {
     const base: NodeJS.ProcessEnv = {};
     for (const k of ENV_PASSTHROUGH) {
       if (process.env[k] !== undefined) base[k] = process.env[k];
     }
     const env: NodeJS.ProcessEnv = { ...base, ...opts.env };
     const p = spawn("node", [opts.mcpPath], { env, stdio: ["pipe", "pipe", "pipe"] });
+    // Each generation gets its own pending map. A crashed process's exit
+    // handler must only ever touch requests it is actually holding — never a
+    // replacement process's in-flight requests — so this can't be the single
+    // outer-scoped map every generation shared before.
+    const pending = new Map<number, PendingEntry>();
     let buf = "";
     p.stdout.on("data", (chunk) => {
       buf += chunk.toString("utf8");
@@ -81,27 +100,30 @@ export async function startSeraMcp(opts: SeraMcpClientOptions): Promise<SeraMcpC
     p.stderr.on("data", (chunk) => process.stderr.write(`[mcp] ${chunk.toString("utf8")}`));
     p.on("exit", (code) => {
       process.stderr.write(`[mcp] exited code=${code}\n`);
+      // Only this generation's own pending requests — a replacement
+      // process's in-flight requests live in their own Map and are untouched.
       for (const [, h] of pending) h.reject(new Error("mcp subprocess exited"));
       pending.clear();
       // A killed process's `exit` event fires asynchronously and can land
-      // after ensureConnected() has already spawned its replacement — guard
-      // against a stale event from a superseded process clobbering the
-      // reference to the one that's actually running now.
-      if (proc === p) {
-        proc = null;
+      // after ensureConnected() already spawned + swapped in a replacement —
+      // guard against a stale event from a superseded generation clobbering
+      // the currently-active connection.
+      if (conn?.proc === p) {
+        conn = null;
         initialized = false;
       }
     });
-    return p;
+    return { proc: p, pending };
   }
 
   function sendRpc(method: string, params: unknown = {}): Promise<any> {
-    if (!proc) throw new Error("mcp not running");
+    if (!conn) throw new Error("mcp not running");
+    const { proc, pending } = conn;
     const id = ++reqId;
     const payload = `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`;
     return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
-      proc!.stdin.write(payload);
+      proc.stdin.write(payload);
       setTimeout(() => {
         if (pending.has(id)) {
           pending.delete(id);
@@ -111,16 +133,9 @@ export async function startSeraMcp(opts: SeraMcpClientOptions): Promise<SeraMcpC
     });
   }
 
-  // Connects (if needed) and completes the initialize handshake (if not done
-  // yet on this process). Called before every tool/rpc call, not just at
-  // startup — a subprocess crash mid-run (OOM, transient failure, ...) resets
-  // `proc`/`initialized` via the exit handler above, and without re-checking
-  // here every call after that would fail forever with "mcp not running"
-  // instead of recovering, silently wedging a long-running caller like
-  // market-maker's poll loop.
-  async function ensureConnected(): Promise<void> {
-    if (!proc) {
-      proc = start();
+  async function doConnect(): Promise<void> {
+    if (!conn) {
+      conn = spawnConnection();
       await new Promise((r) => setTimeout(r, 250));
     }
     if (!initialized) {
@@ -131,6 +146,24 @@ export async function startSeraMcp(opts: SeraMcpClientOptions): Promise<SeraMcpC
       });
       initialized = true;
     }
+  }
+
+  // Connects (if needed) and completes the initialize handshake (if not done
+  // yet on this generation). Called before every tool/rpc call, not just at
+  // startup — a subprocess crash mid-run resets `conn`/`initialized` via the
+  // exit handler above, and without re-checking here every call after that
+  // would fail forever with "mcp not running" instead of recovering, silently
+  // wedging a long-running caller like market-maker's poll loop. Concurrent
+  // callers share one in-flight `connectPromise` rather than each racing
+  // their own spawn + `initialize`.
+  function ensureConnected(): Promise<void> {
+    if (conn && initialized) return Promise.resolve();
+    if (!connectPromise) {
+      connectPromise = doConnect().finally(() => {
+        connectPromise = null;
+      });
+    }
+    return connectPromise;
   }
 
   await ensureConnected();
@@ -155,14 +188,14 @@ export async function startSeraMcp(opts: SeraMcpClientOptions): Promise<SeraMcpC
       return sendRpc(method, params);
     },
     close() {
-      if (proc) {
-        proc.kill();
-        proc = null;
+      if (conn) {
+        conn.proc.kill();
+        conn = null;
         initialized = false;
       }
     },
     running() {
-      return !!proc;
+      return !!conn;
     },
   };
 }

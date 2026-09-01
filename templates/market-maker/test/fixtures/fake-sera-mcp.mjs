@@ -1,21 +1,40 @@
 // Minimal line-delimited JSON-RPC stdio MCP stub, speaking the same framing
 // lib/mcp-client.ts hand-rolls (no @modelcontextprotocol/sdk on this
-// template). Responds to `initialize`, echoes back its own pid via the
-// `sera.echo_pid` tool (so a test can tell whether a call landed on the
-// original subprocess or a respawned one), and exits without responding to
-// `sera.crash_now` to simulate an unexpected subprocess death.
+// template). Responds to `initialize` exactly once per process (a second
+// attempt errors, so a test can catch a client sending duplicate concurrent
+// `initialize` calls), echoes back its own pid via the `sera.echo_pid` tool
+// (so a test can tell whether a call landed on the original subprocess or a
+// respawned one), and exits without responding to `sera.crash_now` to
+// simulate an unexpected subprocess death.
+//
+// FAKE_MCP_EXIT_DELAY_MS (optional): if set, delays process exit on SIGTERM
+// by that many ms, for tests that need a killed process's `exit` event to
+// land well after a replacement has already been spawned and used.
 let buf = "";
+let initialized = false;
+
+const exitDelayMs = Number(process.env.FAKE_MCP_EXIT_DELAY_MS ?? 0);
+if (exitDelayMs > 0) {
+  process.on("SIGTERM", () => {
+    setTimeout(() => process.exit(0), exitDelayMs);
+  });
+}
 
 function respond(id, result) {
-  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n");
+  process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
+}
+
+function respondError(id, message) {
+  process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, error: { message } })}\n`);
 }
 
 process.stdin.on("data", (chunk) => {
   buf += chunk.toString("utf8");
-  let nl;
-  while ((nl = buf.indexOf("\n")) !== -1) {
+  let nl = buf.indexOf("\n");
+  while (nl !== -1) {
     const line = buf.slice(0, nl);
     buf = buf.slice(nl + 1);
+    nl = buf.indexOf("\n");
     if (!line.trim()) continue;
     let msg;
     try {
@@ -24,6 +43,11 @@ process.stdin.on("data", (chunk) => {
       continue;
     }
     if (msg.method === "initialize") {
+      if (initialized) {
+        respondError(msg.id, "already initialized");
+        continue;
+      }
+      initialized = true;
       respond(msg.id, {
         protocolVersion: "2024-11-05",
         capabilities: { tools: {} },
@@ -37,7 +61,9 @@ process.stdin.on("data", (chunk) => {
         process.exit(1);
       }
       if (name === "sera.echo_pid") {
-        respond(msg.id, { content: [{ type: "text", text: JSON.stringify({ pid: process.pid }) }] });
+        respond(msg.id, {
+          content: [{ type: "text", text: JSON.stringify({ pid: process.pid }) }],
+        });
         continue;
       }
       respond(msg.id, { content: [{ type: "text", text: "{}" }] });
